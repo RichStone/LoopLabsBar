@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# <xbar.title>Better MacOS Token Usage Menu Bar</xbar.title>
-# <xbar.version>v1.0</xbar.version>
+# <xbar.title>LoopLabsBar</xbar.title>
+# <xbar.version>v2.0</xbar.version>
 # <xbar.author>Rich Steinmetz</xbar.author>
 # <xbar.author.github>RichStone</xbar.author.github>
-# <xbar.desc>Claude Code, Codex and GitHub Copilot usage limits (% remaining) from the official usage APIs. No credential prompts: Codex/Copilot auth comes from plain config files, Claude's from the Keychain via /usr/bin/security (one-time Always Allow).</xbar.desc>
-# <xbar.abouturl>https://github.com/RichStone/better-macos-token-usage-menu-bar</xbar.abouturl>
+# <xbar.desc>Claude Code, Codex, Cursor, Grok Bot, Grok and GitHub Copilot usage limits (% remaining) from the official usage APIs. No credential prompts: Codex/Cursor/Grok/Copilot auth comes from plain local files, Claude's from the Keychain via /usr/bin/security (one-time Always Allow).</xbar.desc>
+# <xbar.abouturl>https://github.com/RichStone/LoopLabsBar</xbar.abouturl>
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
@@ -12,6 +12,8 @@
 import calendar
 import json
 import os
+import shutil
+import sqlite3
 import subprocess
 import time
 import urllib.error
@@ -21,7 +23,7 @@ from datetime import date, datetime, timezone
 FIVE_HOUR_SECONDS = 5 * 3600
 SEVEN_DAY_SECONDS = 7 * 86400
 
-CACHE_FILE = os.path.expanduser("~/.cache/ai-usage-bar/state.json")
+CACHE_FILE = os.path.expanduser("~/.cache/looplabsbar/state.json")
 CLAUDE_POLL = 5 * 60  # Anthropic's usage endpoint 429s under 1-minute polling; ask it less often
 
 # Monthly billing-cycle renewal day (1-31) per provider, shown in the dropdown as
@@ -30,9 +32,29 @@ CLAUDE_POLL = 5 * 60  # Anthropic's usage endpoint 429s under 1-minute polling; 
 # {"claude_renewal_day": 1, "codex_renewal_day": 10}. The constants are the fallback
 # when a key is absent; None hides the row. Days past a month's length clamp to its
 # last day (e.g. 31 -> Feb 28).
-CONFIG_FILE = os.path.expanduser("~/.config/ai-usage-bar/config.json")
+CONFIG_FILE = os.path.expanduser("~/.config/looplabsbar/config.json")
 CLAUDE_RENEWAL_DAY = None
 CODEX_RENEWAL_DAY = None
+
+# Cursor's Connect-RPC backend. The same bearer token the Cursor IDE/CLI hold
+# answers both Cursor's own plan usage and Grok Bot's weekly usage (Grok Bot is
+# built by Cursor — bundle id com.anysphere.sand — and signs in with a Cursor account).
+CURSOR_RPC = "https://api2.cursor.sh/aiserver.v1.DashboardService/"
+CURSOR_STATE_DB = os.path.expanduser("~/Library/Application Support/Cursor/User/globalStorage/state.vscdb")
+# Grok Build CLI (`grok login`) token file, and the CLI's billing backend.
+GROK_AUTH_FILE = os.path.expanduser(os.environ.get("GROK_HOME") or "~/.grok") + "/auth.json"
+GROK_BILLING_URL = "https://cli-chat-proxy.grok.com/v1/billing?format=credits"
+
+
+def migrate_legacy_dirs():
+    """One-time move of the pre-rename (ai-usage-bar) cache/config dirs into place."""
+    for new, old in ((CACHE_FILE, "~/.cache/ai-usage-bar"), (CONFIG_FILE, "~/.config/ai-usage-bar")):
+        new_dir, old_dir = os.path.dirname(new), os.path.expanduser(old)
+        if os.path.isdir(old_dir) and not os.path.exists(new_dir):
+            try:
+                shutil.move(old_dir, new_dir)
+            except OSError:
+                pass
 
 
 def load_state():
@@ -57,8 +79,8 @@ def save_state(state):
     os.replace(tmp, CACHE_FILE)
 
 
-def http_json(url, headers):
-    req = urllib.request.Request(url, headers={"User-Agent": "ai-usage-bar", **headers})
+def http_json(url, headers, data=None, method=None):
+    req = urllib.request.Request(url, headers={"User-Agent": "LoopLabsBar", **headers}, data=data, method=method)
     with urllib.request.urlopen(req, timeout=15) as r:
         return json.load(r)
 
@@ -120,6 +142,113 @@ def fetch_codex(state):
         return None, "~/.codex/auth.json not found"
     except Exception as e:
         return None, str(e)[:100]
+
+
+def cursor_token():
+    """Cursor's bearer token, from the IDE's plain sqlite state DB (no prompt), else
+    the CLI's Keychain item (one-time Always Allow, like Claude). Returns (token, err)."""
+    for uri in (f"file:{CURSOR_STATE_DB}?mode=ro", f"file:{CURSOR_STATE_DB}?immutable=1"):
+        try:
+            con = sqlite3.connect(uri, uri=True, timeout=2)
+            row = con.execute("select value from ItemTable where key='cursorAuth/accessToken'").fetchone()
+            con.close()
+            if row and row[0]:
+                return row[0], None
+        except sqlite3.Error:
+            continue
+    try:
+        out = subprocess.run(["/usr/bin/security", "find-generic-password",
+                              "-s", "cursor-access-token", "-a", "cursor-user", "-w"],
+                             capture_output=True, text=True, timeout=25)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip(), None
+    except Exception:
+        pass
+    return None, "no Cursor login found — sign in to Cursor or run the agent CLI once"
+
+
+def cursor_rpc(state, key, method):
+    """POST an empty Connect-RPC JSON request to Cursor's DashboardService. Both the
+    Cursor and Grok Bot providers go through here; `key` names the backoff slot."""
+    if state.get(f"{key}_backoff_until", 0) > time.time():
+        return None, "rate-limited, backing off"
+    token, err = cursor_token()
+    if not token:
+        return None, err
+    try:
+        return http_json(CURSOR_RPC + method,
+                         {"Authorization": f"Bearer {token}", "Content-Type": "application/json",
+                          "connect-protocol-version": "1"}, data=b"{}", method="POST"), None
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            state[f"{key}_backoff_until"] = time.time() + 300
+            return None, "rate-limited by Cursor"
+        if e.code == 401:
+            return None, "token rejected — sign in to Cursor again"
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, str(e)[:100]
+
+
+def fetch_cursor(state):
+    """Cursor plan usage for the current monthly billing cycle (auto / API / total)."""
+    return cursor_rpc(state, "cursor", "GetCurrentPeriodUsage")
+
+
+def fetch_grokbot(state):
+    """Grok Bot weekly usage (usagePercent 0-100, resets nextResetTimestampUtc)."""
+    return cursor_rpc(state, "grokbot", "GetSandUsageStatus")
+
+
+def fetch_grok(state):
+    """Grok (xAI) subscription credits via the Grok Build CLI's billing backend, using
+    the token `grok login` writes to ~/.grok/auth.json (a map keyed by scope URL, each
+    entry carrying `key`). Endpoint + fields per steipete/CodexBar's Grok provider."""
+    if state.get("grok_backoff_until", 0) > time.time():
+        return None, "rate-limited, backing off"
+    try:
+        with open(GROK_AUTH_FILE) as f:
+            root = json.load(f)
+    except FileNotFoundError:
+        return None, "no Grok CLI login found — run `grok login`"
+    except Exception as e:
+        return None, str(e)[:100]
+    entries = [v for v in (root.values() if isinstance(root, dict) else []) if isinstance(v, dict) and v.get("key")]
+    if not entries:
+        return None, "auth.json has no token — run `grok login`"
+    entry = entries[0]
+    exp = reset_epoch(entry.get("expires_at"))
+    if exp and exp <= time.time():
+        return None, "token expired — run `grok login`"
+    try:
+        return http_json(GROK_BILLING_URL, {"Authorization": f"Bearer {entry['key']}",
+                                            "x-xai-token-auth": "xai-grok-cli",
+                                            "Accept": "application/json"}), None
+    except urllib.error.HTTPError as e:
+        if e.code == 429:
+            state["grok_backoff_until"] = time.time() + 300
+            return None, "rate-limited by xAI"
+        if e.code == 401:
+            return None, "token rejected — run `grok login`"
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, str(e)[:100]
+
+
+def grok_usage(grok):
+    """(used_percent, period_start_epoch, period_end_epoch) from the credits payload,
+    any of them None when absent. Percent comes from config.creditUsagePercent, else
+    onDemandUsed/onDemandCap; the period from currentPeriod, else billingPeriod*."""
+    cfg = (grok or {}).get("config") or {}
+    used = cfg.get("creditUsagePercent")
+    if used is None:
+        cap = ((cfg.get("onDemandCap") or {}).get("val")) or 0
+        spent = (cfg.get("onDemandUsed") or {}).get("val")
+        used = spent / cap * 100 if cap and spent is not None else None
+    period = cfg.get("currentPeriod") or {}
+    end = reset_epoch(period.get("end")) or reset_epoch(cfg.get("billingPeriodEnd"))
+    start = reset_epoch(period.get("start")) if period.get("end") else reset_epoch(cfg.get("billingPeriodStart"))
+    return used, start, end
 
 
 def fetch_copilot(state):
@@ -307,6 +436,10 @@ HOW_COLORS_WORK = [
     "  to false in the config to show the raw number instead.",
     "  Each credit's ~expiry is estimated locally (the API gives only a count), so",
     "  164% can drop back toward 64% when an unused credit lapses (~30 days).",
+    "Cursor paces against its monthly billing cycle: 'Cu75│0' = 75% of total",
+    "  usage left │ 0% of the named-model (API) bucket left. Grok Bot (Gb) is a",
+    "  weekly meter; Grok (Gk) follows its billing period. These three only join",
+    "  the menu bar once their login has produced data.",
     "A dash (–) means that number failed to load this cycle — NOT that it's full.",
     "Other rows (Copilot, extra $, model-scoped weekly) use plain % left:",
     "  🟢 ≥60%   🟠 20-59%   🔴 <20%.",
@@ -318,9 +451,11 @@ def reset_epoch(value):
     try:
         if value is None:
             return None
+        if isinstance(value, str) and value.strip().lstrip("-").isdigit():
+            value = float(value)
         if isinstance(value, (int, float)):
-            return float(value)
-        return datetime.fromisoformat(value).timestamp()
+            return float(value) / 1000 if value > 1e11 else float(value)  # epoch millis vs seconds
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     except Exception:
         return None
 
@@ -395,16 +530,20 @@ def cell(remaining, unknown, sev="green"):
 
 
 def fmt_reset(value):
-    """Accepts ISO string or epoch seconds, returns local 'HH:MM' today or 'Wed 14:00'."""
+    """Accepts ISO string, epoch seconds or epoch millis; returns local 'HH:MM' today,
+    'Wed 14:00' within a week, 'Oct 19 10:48' beyond that."""
     try:
-        if isinstance(value, (int, float)):
-            dt = datetime.fromtimestamp(value).astimezone()
-        else:
-            dt = datetime.fromisoformat(value).astimezone()
-        if dt.date() == datetime.now().astimezone().date():
+        epoch = reset_epoch(value)
+        if epoch is None:
+            return "?"
+        dt = datetime.fromtimestamp(epoch).astimezone()
+        today = datetime.now().astimezone().date()
+        if dt.date() == today:
             return dt.strftime("%H:%M")
         if (dt.hour, dt.minute) == (0, 0):  # date-only values like Copilot's quota_reset_date
             return dt.strftime("%b %-d")
+        if (dt.date() - today).days > 6:  # beyond a week a weekday name is ambiguous (monthly cycles)
+            return dt.strftime("%b %-d %H:%M")
         return dt.strftime("%a %H:%M")
     except Exception:
         return "?"
@@ -438,6 +577,7 @@ def line(text, **params):
 
 
 def main():
+    migrate_legacy_dirs()
     state = load_state()
     now = time.time()
 
@@ -447,15 +587,22 @@ def main():
 
     claude, claude_err = fetch_claude(state)
     codex, codex_err = fetch_codex(state)
+    cursor, cursor_err = fetch_cursor(state)
+    grokbot, grokbot_err = fetch_grokbot(state)
+    grok, grok_err = fetch_grok(state)
     copilot, copilot_err = fetch_copilot(state)
 
-    for key, data in (("claude", claude), ("codex", codex), ("copilot", copilot)):
+    for key, data in (("claude", claude), ("codex", codex), ("cursor", cursor),
+                      ("grokbot", grokbot), ("grok", grok), ("copilot", copilot)):
         if data is not None:
             state[key] = {"data": data, "ts": now}
     save_state(state)
 
     claude = claude or state.get("claude", {}).get("data")
     codex = codex or state.get("codex", {}).get("data")
+    cursor = cursor or state.get("cursor", {}).get("data")
+    grokbot = grokbot or state.get("grokbot", {}).get("data")
+    grok = grok or state.get("grok", {}).get("data")
     copilot = copilot or state.get("copilot", {}).get("data")
 
     # Ledger the Codex reset-credit count over time (persisted), so we can estimate
@@ -507,6 +654,28 @@ def main():
     cx_w_sev = severity(cx_w_eff, reset_epoch((cx_weekly or {}).get("reset_at")),
                         (cx_weekly or {}).get("limit_window_seconds"), now)
 
+    # Cursor: one monthly billing cycle, three buckets — "total" (everything incl.
+    # bonus usage), "auto" (auto-picked models) and "API" (named models). Paced
+    # against the cycle end, whose length the API reports directly.
+    cu = (cursor or {}).get("planUsage") or {}
+    cu_start, cu_end = reset_epoch((cursor or {}).get("billingCycleStart")), reset_epoch((cursor or {}).get("billingCycleEnd"))
+    cu_window = (cu_end - cu_start) if cu_start and cu_end and cu_end > cu_start else None
+    cu_total, cu_auto, cu_api = left(cu.get("totalPercentUsed")), left(cu.get("autoPercentUsed")), left(cu.get("apiPercentUsed"))
+    cu_total_sev = severity(cu_total, cu_end, cu_window, now)
+    cu_api_sev = severity(cu_api, cu_end, cu_window, now)
+
+    # Grok Bot: a single weekly meter (usagePercent is 0-100, like its own UI shows it).
+    gb_left = left((grokbot or {}).get("usagePercent")) if grokbot else None
+    gb_start, gb_end = reset_epoch((grokbot or {}).get("currentPeriodStart")), reset_epoch((grokbot or {}).get("nextResetTimestampUtc"))
+    gb_window = (gb_end - gb_start) if gb_start and gb_end and gb_end > gb_start else SEVEN_DAY_SECONDS
+    gb_sev = severity(gb_left, gb_end, gb_window, now)
+
+    # Grok (xAI subscription credits via the Grok CLI's billing backend).
+    gk_used, gk_start, gk_end = grok_usage(grok)
+    gk_left = left(gk_used) if grok else None
+    gk_window = (gk_end - gk_start) if gk_start and gk_end and gk_end > gk_start else None
+    gk_sev = severity(gk_left, gk_end, gk_window, now)
+
     # One status dot per limit, bookending each provider's two numbers: session's
     # dot on the left, weekly's on the right (│ is U+2502, not a literal pipe —
     # SwiftBar treats "|" as its parameter separator). SwiftBar allows only one
@@ -534,6 +703,20 @@ def main():
         cx_sd = "☠️"
     title = (f"{cc_sd}CC{cc_sv}│{cc_wv}{cc_wd}"
              f" {cx_sd}Cx{cx_sv}│{cx_wv}{cx_wd}")
+    # Cursor / Grok Bot / Grok join the title only once they have ever produced data —
+    # a permanent "–" for a tool you may never log into would just be menu-bar noise.
+    # Cursor shows total│API (API = named models, the bucket that runs dry first);
+    # Grok Bot and Grok are single meters, dot on the right.
+    if cursor:
+        cu_tv, cu_td = cell(cu_total, False, cu_total_sev)
+        cu_av, cu_ad = cell(cu_api, False, cu_api_sev)
+        title += f" {cu_td}Cu{cu_tv}│{cu_av}{cu_ad}"
+    if grokbot:
+        gb_v, gb_d = cell(gb_left, False, gb_sev)
+        title += f" Gb{gb_v}{gb_d}"
+    if grok:
+        gk_v, gk_d = cell(gk_left, False, gk_sev)
+        title += f" Gk{gk_v}{gk_d}"
     print(f"{clean(title)} | font=Menlo size=12")
     print("---")
 
@@ -621,6 +804,55 @@ def main():
         print(line(f"⚠ {codex_err}", color="#febc2e"))
         if codex:
             print(line(f"showing data from {age_text(now - state.get('codex', {}).get('ts', now))} ago", color="gray"))
+    print("---")
+
+    # --- Cursor section ---
+    cu_plan = f" ({grokbot.get('cursorPlanName')})" if grokbot and grokbot.get("cursorPlanName") else ""
+    print(f"{clean(f'Cursor{cu_plan}')} | size=13 color=#000000,#ffffff bash=/usr/bin/true terminal=false")
+    if cursor:
+        for label, val in (("Total", cu_total), ("Auto", cu_auto), ("API", cu_api)):
+            print(line(f"{label:<8} {pct(val)}% left  ·  resets {fmt_reset(cu_end)}",
+                       color=SEV_COLOR.get(severity(val, cu_end, cu_window, now)), mono=True))
+        bd = cu.get("bonusSpend")
+        if bd:
+            print(line(f"{'':<8} incl. ${bd / 100:,.2f} bonus usage on top of the ${(cu.get('limit') or 0) / 100:,.0f} plan",
+                       color="gray", mono=True))
+    if cursor_err:
+        print(line(f"⚠ {cursor_err}", color="#febc2e"))
+        if cursor:
+            print(line(f"showing data from {age_text(now - state.get('cursor', {}).get('ts', now))} ago", color="gray"))
+    print("---")
+
+    # --- Grok Bot section (Cursor's desktop agent for xAI; same Cursor login) ---
+    gb_plan = f" ({grokbot.get('grokPlanLabel')})" if grokbot and grokbot.get("grokPlanLabel") else ""
+    print(f"{clean(f'Grok Bot{gb_plan}')} | size=13 color=#000000,#ffffff bash=/usr/bin/true terminal=false")
+    if grokbot:
+        print(line(f"{'Weekly':<8} {pct(gb_left)}% left  ·  resets {fmt_reset(gb_end)}",
+                   color=SEV_COLOR.get(gb_sev), mono=True))
+        if grokbot.get("hasAvailableUsage") is False:
+            print(line(f"{'':<8} no usage available on this plan", color=COLOR_RED, mono=True))
+    if grokbot_err:
+        print(line(f"⚠ {grokbot_err}", color="#febc2e"))
+        if grokbot:
+            print(line(f"showing data from {age_text(now - state.get('grokbot', {}).get('ts', now))} ago", color="gray"))
+    print("---")
+
+    # --- Grok section (xAI subscription credits via the Grok Build CLI login) ---
+    gk_cfg = (grok or {}).get("config") or {}
+    gk_tier = gk_cfg.get("subscriptionTier") or (grok or {}).get("subscriptionTier")
+    gk_plan = f" ({gk_tier})" if gk_tier else ""
+    print(f"{clean(f'Grok{gk_plan}')} | size=13 color=#000000,#ffffff bash=/usr/bin/true terminal=false")
+    if grok:
+        if gk_left is not None:
+            label = "Weekly" if gk_window and gk_window <= 8 * 86400 else "Credits"
+            print(line(f"{label:<8} {pct(gk_left)}% left  ·  resets {fmt_reset(gk_end)}",
+                       color=SEV_COLOR.get(gk_sev), mono=True))
+        else:
+            print(line(f"{'Credits':<8} –  ·  usage not reported" + (f"  ·  resets {fmt_reset(gk_end)}" if gk_end else ""), mono=True))
+    if grok_err:
+        print(line(f"⚠ {grok_err}", color="#febc2e"))
+        if grok:
+            print(line(f"showing data from {age_text(now - state.get('grok', {}).get('ts', now))} ago", color="gray"))
     print("---")
 
     # --- Copilot section (dropdown only, deliberately not in the menu bar title) ---
