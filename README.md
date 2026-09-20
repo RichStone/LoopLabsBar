@@ -6,7 +6,7 @@ All your AI coding limits in the macOS menu bar — **Claude Code, OpenAI Codex,
 🟢CC67│19🔴 Cx│39🟠 🟠Cu75│0☠️ Gb100🟢    ← one segment per provider, one dot per limit
 ```
 
-`CC` Claude Code session│weekly · `Cx` Codex session│weekly · `Cu` Cursor total│API (monthly cycle) · `Gb` Grok Bot weekly · `Gk` Grok credits. Cursor, Grok Bot and Grok appear only once that login has produced data, so a tool you don't use never takes up menu-bar space.
+`CC` Claude Code session│weekly · `Cx` Codex session│weekly · `Cu` Cursor total│API (monthly cycle) · `Gb` Grok Bot weekly · `Gk` Grok credits. Cursor, Grok Bot and Grok appear only once that login has produced data, so a tool you don't use never takes up menu-bar space. Choose which providers get a menu-bar segment (and in what order) with the `menubar` config key below — every provider keeps its dropdown section regardless.
 
 All numbers are **% remaining** (how much you have left, not how much you used). Session/weekly meters (Claude's 5h/7d, Codex's own windows) are colored by **pace** — are you spending faster than a straight line to the next reset — not just the raw %, so "92% left" can still show yellow if you burned a chunk right after a reset: **🟢** on pace or better, **🟡** a little behind, **🟠** well behind (or ≤15% left regardless of pace), **🔴** way behind (or ≤5% left regardless of pace), **☠️** actually at 0% (a distinct glyph, not just another dot, so it can't be misread as healthy at a glance). If weekly dies, session shows ☠️ too — a dead weekly blocks you regardless of session headroom. Cursor is paced against its monthly billing cycle and Grok Bot against its weekly one, the same way. Meters with no reset line (Copilot, extra usage, model-scoped weekly caps) use a plain remaining-% scale instead: **🟢** ≥60%, **🟠** 20–59%, **🔴** <20%. A window the API doesn't report at all (e.g. Codex has no session window on some plans) drops its value and dot rather than showing a ball that would read as "all good"; a **–** means that provider has never returned data at all (first run, or a persistent failure with nothing cached yet) — a provider that's merely erroring right now but already has a cached payload (e.g. after a restart, while waiting out a rate-limit backoff) keeps showing its last-known numbers in the title too, exactly like the dropdown does. (SwiftBar allows only one text color on the menu bar title, so independent per-limit signaling uses emoji dots; the dropdown rows tint their numbers too, and an "ℹ️ How the colors work" row at the bottom of the dropdown explains all of this in the app itself.) Click it for details:
 
@@ -115,7 +115,15 @@ open -a SwiftBar
 { "claude_renewal_day": 1, "codex_renewal_day": 10, "codex_count_reset_credits": true }
 ```
 
-Omit a key (or the whole file) to hide that row. As a fallback you can instead edit the `CLAUDE_RENEWAL_DAY` / `CODEX_RENEWAL_DAY` constants at the top of the script, but the config file is preferred since a re-download overwrites the script.
+Omit a key (or the whole file) to hide that row.
+
+**Menu-bar segments (`menubar`).** Which providers appear in the title, in that order — `claude`, `codex`, `cursor`, `grokbot`, `grok`, `copilot`. Default is all but Copilot (`Cp` premium-requests % left, opt-in):
+
+```json
+{ "menubar": ["claude", "codex", "grokbot"] }
+```
+
+Providers left out keep their dropdown section; only the title segment goes. As a fallback you can instead edit the `CLAUDE_RENEWAL_DAY` / `CODEX_RENEWAL_DAY` constants at the top of the script, but the config file is preferred since a re-download overwrites the script.
 
 **Codex reset credits (`codex_count_reset_credits`, default `true`).** Each banked Codex rate-limit reset credit buys back a full window, so it's genuine weekly headroom. By default the widget folds them into the Codex weekly figure — e.g. `64% now + 1 reset` shows as **164% left**, with the breakdown in the dropdown. Set this to `false` to display the raw weekly number and a separate `Reset credits available: N` row instead.
 

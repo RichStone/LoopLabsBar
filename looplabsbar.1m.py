@@ -35,6 +35,9 @@ CLAUDE_POLL = 5 * 60  # Anthropic's usage endpoint 429s under 1-minute polling; 
 CONFIG_FILE = os.path.expanduser("~/.config/looplabsbar/config.json")
 CLAUDE_RENEWAL_DAY = None
 CODEX_RENEWAL_DAY = None
+# Which providers get a segment in the menu-bar title, in this order. Override with
+# "menubar": [...] in the config file (every provider still gets its dropdown section).
+MENUBAR_DEFAULT = ["claude", "codex", "cursor", "grokbot", "grok"]   # "copilot" is opt-in
 
 # Cursor's Connect-RPC backend. The same bearer token the Cursor IDE/CLI hold
 # answers both Cursor's own plan usage and Grok Bot's weekly usage (Grok Bot is
@@ -439,7 +442,9 @@ HOW_COLORS_WORK = [
     "Cursor paces against its monthly billing cycle: 'Cu75│0' = 75% of total",
     "  usage left │ 0% of the named-model (API) bucket left. Grok Bot (Gb) is a",
     "  weekly meter; Grok (Gk) follows its billing period. These three only join",
-    "  the menu bar once their login has produced data.",
+    "  the menu bar once their login has produced data. Pick which providers sit",
+    "  in the menu bar with \"menubar\": [\"claude\",\"codex\",\"cursor\",\"grokbot\",\"grok\",\"copilot\"]",
+    "  in the config file (that order; Copilot is off unless listed).",
     "A dash (–) means that number failed to load this cycle — NOT that it's full.",
     "Other rows (Copilot, extra $, model-scoped weekly) use plain % left:",
     "  🟢 ≥60%   🟠 20-59%   🔴 <20%.",
@@ -701,22 +706,29 @@ def main():
         cc_sd = "☠️"
     if cx_wd == "☠️" and cx_sd:
         cx_sd = "☠️"
-    title = (f"{cc_sd}CC{cc_sv}│{cc_wv}{cc_wd}"
-             f" {cx_sd}Cx{cx_sv}│{cx_wv}{cx_wd}")
-    # Cursor / Grok Bot / Grok join the title only once they have ever produced data —
+    # One segment per provider listed in the config's "menubar" (default: all but
+    # Copilot). Claude/Codex show "–" while they have never had data; Cursor / Grok
+    # Bot / Grok / Copilot stay out of the title until their login has produced data —
     # a permanent "–" for a tool you may never log into would just be menu-bar noise.
     # Cursor shows total│API (API = named models, the bucket that runs dry first);
-    # Grok Bot and Grok are single meters, dot on the right.
+    # Grok Bot, Grok and Copilot are single meters, dot on the right.
+    segments = {"claude": f"{cc_sd}CC{cc_sv}│{cc_wv}{cc_wd}",
+                "codex": f"{cx_sd}Cx{cx_sv}│{cx_wv}{cx_wd}"}
     if cursor:
         cu_tv, cu_td = cell(cu_total, False, cu_total_sev)
         cu_av, cu_ad = cell(cu_api, False, cu_api_sev)
-        title += f" {cu_td}Cu{cu_tv}│{cu_av}{cu_ad}"
+        segments["cursor"] = f"{cu_td}Cu{cu_tv}│{cu_av}{cu_ad}"
     if grokbot:
-        gb_v, gb_d = cell(gb_left, False, gb_sev)
-        title += f" Gb{gb_v}{gb_d}"
+        segments["grokbot"] = "Gb%s%s" % cell(gb_left, False, gb_sev)
     if grok:
-        gk_v, gk_d = cell(gk_left, False, gk_sev)
-        title += f" Gk{gk_v}{gk_d}"
+        segments["grok"] = "Gk%s%s" % cell(gk_left, False, gk_sev)
+    cp_prem = ((copilot or {}).get("quota_snapshots") or {}).get("premium_interactions") or {}
+    if copilot and not cp_prem.get("unlimited") and cp_prem.get("percent_remaining") is not None:
+        segments["copilot"] = "Cp%s%s" % cell(cp_prem["percent_remaining"], False,
+                                             severity(cp_prem["percent_remaining"]))
+    wanted = cfg.get("menubar", MENUBAR_DEFAULT)
+    wanted = [w for w in wanted if isinstance(w, str)] if isinstance(wanted, list) else MENUBAR_DEFAULT
+    title = " ".join(segments[k] for k in wanted if k in segments) or "LL"
     print(f"{clean(title)} | font=Menlo size=12")
     print("---")
 
