@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# <xbar.title>LoopLabsBar</xbar.title>
+# <xbar.title>LoopLabsBar 🧪</xbar.title>
 # <xbar.version>v2.0</xbar.version>
 # <xbar.author>Rich Steinmetz</xbar.author>
 # <xbar.author.github>RichStone</xbar.author.github>
@@ -8,6 +8,8 @@
 # <swiftbar.hideAbout>true</swiftbar.hideAbout>
 # <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
 # <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
+# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
+# <swiftbar.hideSwiftBar>true</swiftbar.hideSwiftBar>
 
 import calendar
 import json
@@ -38,6 +40,26 @@ CODEX_RENEWAL_DAY = None
 # Which providers get a segment in the menu-bar title, in this order. Override with
 # "menubar": [...] in the config file (every provider still gets its dropdown section).
 MENUBAR_DEFAULT = ["claude", "codex", "cursor", "grokbot", "grok"]   # "copilot" is opt-in
+PROVIDERS = [("claude", "Claude Code", "CC"), ("codex", "Codex", "Cx"), ("cursor", "Cursor", "Cu"),
+             ("grokbot", "Grok Bot", "Gb"), ("grok", "Grok", "Gk"), ("copilot", "Copilot", "Cp")]
+SCRIPT = os.path.abspath(__file__)
+
+
+def menubar_list(cfg):
+    wanted = cfg.get("menubar", MENUBAR_DEFAULT)
+    return [w for w in wanted if isinstance(w, str)] if isinstance(wanted, list) else list(MENUBAR_DEFAULT)
+
+
+def toggle_menubar(provider):
+    """`--toggle <provider>` from the dropdown's LoopLabsBar submenu: flip that provider's
+    title segment in the config file (kept in canonical PROVIDERS order), mode 600."""
+    cfg = read_config()
+    shown = set(menubar_list(cfg)) ^ {provider}
+    cfg["menubar"] = [k for k, _, _ in PROVIDERS if k in shown]
+    os.makedirs(os.path.dirname(CONFIG_FILE), mode=0o700, exist_ok=True)
+    fd = os.open(CONFIG_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump(cfg, f, indent=2)
 
 # Cursor's Connect-RPC backend. The same bearer token the Cursor IDE/CLI hold
 # answers both Cursor's own plan usage and Grok Bot's weekly usage (Grok Bot is
@@ -575,8 +597,9 @@ def line(text, **params):
         "font=Menlo size=12" if params.get("mono") else None,
         f"href={params['href']}" if params.get("href") else None,
         "refresh=true" if params.get("refresh") else None,
+        params.get("bash"),  # a ready-made 'bash=... param1=... terminal=false' action
     ] if p]
-    if not (params.get("href") or params.get("refresh")):
+    if not (params.get("href") or params.get("refresh") or params.get("bash")):
         parts.append("bash=/usr/bin/true terminal=false")
     return f"{clean(text)} | {' '.join(parts)}"
 
@@ -726,8 +749,7 @@ def main():
     if copilot and not cp_prem.get("unlimited") and cp_prem.get("percent_remaining") is not None:
         segments["copilot"] = "Cp%s%s" % cell(cp_prem["percent_remaining"], False,
                                              severity(cp_prem["percent_remaining"]))
-    wanted = cfg.get("menubar", MENUBAR_DEFAULT)
-    wanted = [w for w in wanted if isinstance(w, str)] if isinstance(wanted, list) else MENUBAR_DEFAULT
+    wanted = menubar_list(cfg)
     title = " ".join(segments[k] for k in wanted if k in segments) or "LL"
     print(f"{clean(title)} | font=Menlo size=12")
     print("---")
@@ -896,9 +918,27 @@ def main():
     print(line("ℹ️  How the colors work", color="gray"))
     for tip in HOW_COLORS_WORK:
         print(line(f"--{tip}", color="gray", mono=True))
+    # SwiftBar's own submenu is hidden (hideSwiftBar); this is the app's settings menu.
+    print(line("🧪 LoopLabsBar"))
+    print(line("--Show in the menu bar:", color="gray"))
+    for key, name, abbr in PROVIDERS:
+        mark = "✓" if key in wanted else "   "
+        print(line(f"--{mark} {name}  ·  {abbr}", mono=True,
+                   bash=f"bash={SCRIPT} param1=--toggle param2={key} terminal=false refresh=true"))
+    print(line("-----"))
+    print(line("--Open config.json", bash=f"bash=/usr/bin/open param1=-t param2={CONFIG_FILE} terminal=false"))
+    print(line("--Open plugin folder", bash=f"bash=/usr/bin/open param1={os.path.dirname(SCRIPT)} terminal=false"))
+    print(line("--Refresh everything", refresh=True))
+    print(line("-----"))
+    print(line("--LoopLabsBar on GitHub", href="https://github.com/RichStone/LoopLabsBar"))
+    print(line("--Quit LoopLabsBar (SwiftBar)", bash="bash=/usr/bin/osascript param1=-e param2=quit\ app\ \"SwiftBar\" terminal=false"))
 
 
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) == 3 and sys.argv[1] == "--toggle" and sys.argv[2] in {k for k, _, _ in PROVIDERS}:
+        toggle_menubar(sys.argv[2])
+        sys.exit(0)
     try:
         main()
     except Exception:
