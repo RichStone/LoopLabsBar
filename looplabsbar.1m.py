@@ -925,13 +925,12 @@ def main():
         mark = "✓" if key in wanted else "   "
         print(line(f"--{mark} {name}  ·  {abbr}", mono=True,
                    bash=f"bash={SCRIPT} param1=--toggle param2={key} terminal=false refresh=true"))
-    print(line("-----"))
+    print("-----")
     print(line("--Open config.json", bash=f"bash=/usr/bin/open param1=-t param2={CONFIG_FILE} terminal=false"))
     print(line("--Open plugin folder", bash=f"bash=/usr/bin/open param1={os.path.dirname(SCRIPT)} terminal=false"))
     print(line("--Refresh everything", refresh=True))
-    print(line("-----"))
+    print("-----")
     print(line("--LoopLabsBar on GitHub", href="https://github.com/RichStone/LoopLabsBar"))
-    print(line("--Quit LoopLabsBar (SwiftBar)", bash="bash=/usr/bin/osascript param1=-e param2=quit\ app\ \"SwiftBar\" terminal=false"))
 
 
 if __name__ == "__main__":

@@ -123,7 +123,7 @@ Omit a key (or the whole file) to hide that row.
 { "menubar": ["claude", "codex", "grokbot"] }
 ```
 
-Providers left out keep their dropdown section; only the title segment goes. As a fallback you can instead edit the `CLAUDE_RENEWAL_DAY` / `CODEX_RENEWAL_DAY` constants at the top of the script, but the config file is preferred since a re-download overwrites the script.
+Providers left out keep their dropdown section; only the title segment goes. You don't have to edit the file: the **🧪 LoopLabsBar** submenu at the bottom of the dropdown has a checkmark row per provider that toggles it (it rewrites this key), plus shortcuts to the config file and plugin folder. That submenu replaces SwiftBar's own, which the plugin hides. As a fallback you can instead edit the `CLAUDE_RENEWAL_DAY` / `CODEX_RENEWAL_DAY` constants at the top of the script, but the config file is preferred since a re-download overwrites the script.
 
 **Codex reset credits (`codex_count_reset_credits`, default `true`).** Each banked Codex rate-limit reset credit buys back a full window, so it's genuine weekly headroom. By default the widget folds them into the Codex weekly figure — e.g. `64% now + 1 reset` shows as **164% left**, with the breakdown in the dropdown. Set this to `false` to display the raw weekly number and a separate `Reset credits available: N` row instead.
 
