@@ -29,11 +29,18 @@ CACHE_FILE = os.path.expanduser("~/.cache/looplabsbar/state.json")
 CLAUDE_POLL = 5 * 60  # Anthropic's usage endpoint 429s under 1-minute polling; ask it less often
 
 # Monthly billing-cycle renewal day (1-31) per provider, shown in the dropdown as
-# the next occurrence (neither usage API reports it). Configure without editing this
-# file — a re-download would overwrite it — by creating the JSON config below with
-# {"claude_renewal_day": 1, "codex_renewal_day": 10}. The constants are the fallback
-# when a key is absent; None hides the row. Days past a month's length clamp to its
-# last day (e.g. 31 -> Feb 28).
+# the next occurrence. Neither usage API reports it, but both providers can be pinned
+# down anyway: Codex's real renewal date comes from its subscription entitlement (see
+# fetch_codex_entitlement), and Claude's is learned by watching the extra-usage pool
+# reset (see track_claude_cycle), falling back meanwhile to the plan's billing
+# anniversary (see plan_anniversary). These days are only the seed shown until one of
+# those lands — and the safety net if those calls ever stop answering.
+# A hand-set day is worth re-checking after a plan change: changing plans mid-cycle
+# re-anchors the billing date to the day you switched.
+# Configure without editing this file — a re-download would overwrite it — by creating
+# the JSON config below with {"claude_renewal_day": 1, "codex_renewal_day": 10}. The
+# constants are the fallback when a key is absent; None hides the row until a real
+# date is known. Days past a month's length clamp to its last day (e.g. 31 -> Feb 28).
 CONFIG_FILE = os.path.expanduser("~/.config/looplabsbar/config.json")
 CLAUDE_RENEWAL_DAY = None
 CODEX_RENEWAL_DAY = None
@@ -146,6 +153,52 @@ def fetch_claude(state):
         return None, str(e)[:100]
 
 
+CLAUDE_PROFILE_POLL = 6 * 3600  # org/plan facts, not usage — hours between calls is plenty
+
+
+def fetch_claude_profile(state, now):
+    """The account's profile, purely for `organization.subscription_created_at`: the
+    day the plan's billing cycle is anchored to, which is the closest thing Anthropic
+    exposes to a renewal date. Cached for hours and silent on failure — this only
+    feeds a fallback. Shares the usage endpoint's backoff so a rate-limited widget
+    doesn't keep poking Anthropic from a second place."""
+    cached = state.get("claude_profile") or {}
+    if now - cached.get("ts", 0) < CLAUDE_PROFILE_POLL or state.get("claude_backoff_until", 0) > now:
+        return cached.get("data")
+    try:
+        out = subprocess.run(
+            ["/usr/bin/security", "find-generic-password",
+             "-s", "Claude Code-credentials", "-a", os.environ.get("USER", ""), "-w"],
+            capture_output=True, text=True, timeout=25)
+        if out.returncode != 0:
+            return cached.get("data")
+        token = json.loads(out.stdout.strip())["claudeAiOauth"]["accessToken"]
+        org = http_json("https://api.anthropic.com/api/oauth/profile",
+                        {"Authorization": f"Bearer {token}",
+                         "anthropic-beta": "oauth-2025-04-20"}).get("organization") or {}
+        # Keep the billing fields only; the rest is account metadata we don't need cached.
+        slim = {k: org.get(k) for k in ("subscription_created_at", "billing_type", "subscription_status")}
+        if slim.get("subscription_created_at"):
+            state["claude_profile"] = {"data": slim, "ts": now}
+            return slim
+    except Exception:
+        pass
+    return cached.get("data")
+
+
+def plan_anniversary(profile):
+    """The day of the month an active Stripe subscription is anchored to — Stripe bills
+    on the anniversary of the subscription's creation — or None. An inference, not a
+    published renewal date, so callers label it as one; a witnessed credit reset
+    outranks it."""
+    if not profile or profile.get("subscription_status") not in (None, "active"):
+        return None
+    if profile.get("billing_type") != "stripe_subscription":
+        return None   # prepaid/credit orgs have no monthly anniversary to speak of
+    created = reset_epoch(profile.get("subscription_created_at"))
+    return datetime.fromtimestamp(created).day if created else None
+
+
 def fetch_codex(state):
     if state.get("codex_backoff_until", 0) > time.time():
         return None, "rate-limited, backing off"
@@ -167,6 +220,60 @@ def fetch_codex(state):
         return None, "~/.codex/auth.json not found"
     except Exception as e:
         return None, str(e)[:100]
+
+
+CODEX_ENTITLEMENT_POLL = 6 * 3600  # billing facts move once a month, not once a minute
+
+
+def fetch_codex_entitlement(state, now):
+    """The subscription record behind ChatGPT's billing page — plan, billing period and
+    the real renewal date, none of which the usage endpoint carries. A second, far
+    rarer call, cached for hours because it only changes when the plan does. Returns
+    the entitlement dict (fresh or cached), or None. Failures are deliberately silent:
+    the renewal row just falls back to the configured day."""
+    cached = state.get("codex_entitlement") or {}
+    if now - cached.get("ts", 0) < CODEX_ENTITLEMENT_POLL:
+        return cached.get("data")
+    try:
+        with open(os.path.expanduser("~/.codex/auth.json")) as f:
+            tokens = json.load(f)["tokens"]
+        headers = {"Authorization": f"Bearer {tokens['access_token']}"}
+        account_id = tokens.get("account_id")
+        if account_id:
+            headers["ChatGPT-Account-Id"] = account_id
+        # Cloudflare challenges this path (unlike /wham/usage) for a bare Python-urllib
+        # User-Agent, so it must keep going through http_json, which sets a real one.
+        accounts = http_json("https://chatgpt.com/backend-api/accounts/check/v4-2023-04-27",
+                             headers).get("accounts") or {}
+        ent = (accounts.get(account_id) or accounts.get("default") or {}).get("entitlement")
+        if ent:
+            # Cache the billing slice only — the full response is a page of account
+            # metadata we have no use for.
+            state["codex_entitlement"] = {"data": ent, "ts": now}
+            return ent
+    except Exception:
+        pass
+    return cached.get("data")
+
+
+def renewal_from_entitlement(ent):
+    """(label, 'Mon D', billing period) for the Codex subscription, or None when there
+    is no active one. A pending cancellation is reported as the date it ends rather
+    than as a renewal. `last_active_subscription.will_renew` is deliberately ignored:
+    it describes the subscription a mid-cycle plan change replaced, so it reads false
+    while the plan that replaced it is perfectly alive."""
+    if not ent or not ent.get("has_active_subscription"):
+        return None
+    cancels = ent.get("cancels_at")
+    when = reset_epoch(cancels or ent.get("renews_at") or ent.get("expires_at"))
+    # A date already behind us means the cached copy outlived its cycle and refreshes
+    # are failing. Say nothing and let the caller fall back to a day it can roll
+    # forward itself, rather than parade last month's date all month.
+    if when is None or datetime.fromtimestamp(when).date() < date.today():
+        return None
+    return ("Ends" if cancels else "Renews",
+            datetime.fromtimestamp(when).strftime("%b %-d"),
+            (ent.get("billing_period") or "monthly").lower())
 
 
 def cursor_token():
@@ -401,6 +508,27 @@ def track_reset_credits(state, codex, now):
     led["count"] = current
 
 
+CYCLE_RESET_FLOOR = 500  # $5.00 in credit minor units — below that, a drop proves nothing
+
+
+def track_claude_cycle(state, claude, now):
+    """Learn Claude's monthly boundary by watching the extra-usage pool empty. Anthropic
+    publishes no renewal date on the OAuth API, and a Team seat can't read the org's
+    billing page either — but that pool only ever falls back toward zero when the cycle
+    turns over, so the day we catch it dropping IS the renewal day. One witnessed reset
+    retires the configured guess. Requires a meaningful prior balance so that rounding
+    or a refund can't pass for a turnover. No-op while extra usage is off or unseen."""
+    used = ((claude or {}).get("extra_usage") or {}).get("used_credits")
+    if used is None:
+        return
+    led = state.setdefault("claude_cycle", {})
+    prev = led.get("used")
+    if prev is not None and prev >= CYCLE_RESET_FLOOR and used <= prev / 2:
+        led["day"] = datetime.fromtimestamp(now).day
+        led["observed_at"] = now
+    led["used"] = used
+
+
 def reset_credit_expiry(state, now):
     """(date_str, days_until) for the soonest-expiring tracked reset credit, or
     (None, None). Estimated ~30 days after each credit was first observed locally."""
@@ -619,6 +747,8 @@ def main():
     grokbot, grokbot_err = fetch_grokbot(state)
     grok, grok_err = fetch_grok(state)
     copilot, copilot_err = fetch_copilot(state)
+    codex_ent = fetch_codex_entitlement(state, now)
+    claude_profile = fetch_claude_profile(state, now)
 
     for key, data in (("claude", claude), ("codex", codex), ("cursor", cursor),
                       ("grokbot", grokbot), ("grok", grok), ("copilot", copilot)):
@@ -637,6 +767,7 @@ def main():
     # each credit's ~30-day expiry the API never exposes. Saved now — before windows
     # are rolled below — since rolled estimates are deliberately not persisted.
     track_reset_credits(state, codex, now)
+    track_claude_cycle(state, claude, now)
     save_state(state)
 
     # Roll any window whose reset has passed forward to the current period, so a cache
@@ -786,9 +917,15 @@ def main():
             reason = (extra.get("disabled_reason") or "off").replace("_", " ")
             spent = extra.get("disabled_reason") == "out_of_credits" or extra.get("spend_limit_reached")
             print(line(f"Extra    {reason}", color=(COLOR_RED if spent else None), mono=True))
-    renewal = next_renewal(claude_day)
-    if renewal:
-        print(line(f"{'Renews':<8} {renewal}  ·  monthly plan", mono=True))
+    # Evidence first: a reset we actually watched beats the subscription's anniversary,
+    # which in turn beats a day typed into the config months ago.
+    for day, source in ((valid_day((state.get("claude_cycle") or {}).get("day")), "observed credit reset"),
+                        (valid_day(plan_anniversary(claude_profile)), "plan anniversary"),
+                        (claude_day, "monthly plan")):
+        renewal = next_renewal(day)
+        if renewal:
+            print(line(f"{'Renews':<8} {renewal}  ·  {source}", mono=True))
+            break
     if claude_err:
         print(line(f"⚠ {claude_err}", color="#febc2e"))
         if claude:
@@ -831,8 +968,12 @@ def main():
         resets = (codex.get("rate_limit_reset_credits") or {}).get("available_count")
         if resets and not fold_resets:  # when folded, the weekly breakdown already shows it
             print(line(f"Reset credits available: {resets}", mono=True))
+    entitled = renewal_from_entitlement(codex_ent)
     renewal = next_renewal(codex_day)
-    if renewal:
+    if entitled:
+        label, when, period = entitled
+        print(line(f"{label:<8} {when}  ·  {period} plan", mono=True))
+    elif renewal:
         print(line(f"{'Renews':<8} {renewal}  ·  monthly plan", mono=True))
     if codex_err:
         print(line(f"⚠ {codex_err}", color="#febc2e"))

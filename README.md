@@ -109,13 +109,19 @@ open -a SwiftBar
 
 `Preferred Position 1` also pins the icon to the rightmost slot macOS allows third-party items. For a permanent fix, wrap those lines in a launchd agent (or login script) that runs them before starting SwiftBar.
 
-**Monthly plan renewal date.** Neither usage API exposes your billing-cycle renewal, so it's a manual setting that adds a "Renews <date>" row to each provider's dropdown (the widget computes the next occurrence and clamps to short months). Configure it in `~/.config/looplabsbar/config.json` — this survives re-downloading the script (Cursor, Grok Bot and Grok report their own cycle end, so they need no setting):
+**Monthly plan renewal date.** Neither *usage* API exposes your billing cycle, so the "Renews <date>" row works it out per provider, best evidence first — and only falls back to a day you type in:
+
+- **Codex** reads the real date off the subscription itself (`accounts/check` → `entitlement.renews_at`, the same record the ChatGPT billing page renders), so a mid-cycle plan change moves the row on its own. A plan set to cancel shows `Ends` instead of `Renews`, and a yearly plan says so. Asked for every six hours, cached in between.
+- **Claude** has no renewal date anywhere on the OAuth API — a Team seat can't even see the org's billing page — so the widget watches the extra-usage pool instead: that pool only drops back toward zero when the cycle turns over, so the day it does is the renewal day, and it's remembered (`observed credit reset`). Until one is witnessed it infers the day from the subscription's creation anniversary (`plan anniversary`), Stripe's own anchor.
+- **Cursor, Grok Bot and Grok** report their cycle end directly and need no setting.
+
+The configured day is the seed for before any of that lands, and the safety net if a provider's billing endpoint stops answering (a date that has already passed is treated as stale and drops back to it). Set it in `~/.config/looplabsbar/config.json`, which survives re-downloading the script:
 
 ```json
 { "claude_renewal_day": 1, "codex_renewal_day": 10, "codex_count_reset_credits": true }
 ```
 
-Omit a key (or the whole file) to hide that row.
+Omit a key (or the whole file) to hide the row until a real date is known. A hand-set day is worth re-checking after an upgrade or downgrade: changing plans mid-cycle re-anchors the billing date to the day you switched, and a typed-in day will happily keep showing the old one.
 
 **Menu-bar segments (`menubar`).** Which providers appear in the title, in that order — `claude`, `codex`, `cursor`, `grokbot`, `grok`, `copilot`. Default is all but Copilot (`Cp` premium-requests % left, opt-in):
 
