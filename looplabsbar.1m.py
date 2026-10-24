@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
 
 FIVE_HOUR_SECONDS = 5 * 3600
 SEVEN_DAY_SECONDS = 7 * 86400
@@ -485,6 +486,24 @@ def win_left(window):
     return left(window.get("used_percent")) if window else None
 
 
+def codex_credit_text(codex):
+    """Spendable credit balance, with no inferred percentage or expiry."""
+    credits = (codex or {}).get("credits") or {}
+    if credits.get("overage_limit_reached"):
+        return None
+    if credits.get("unlimited"):
+        return "∞"
+    if not credits.get("has_credits"):
+        return None
+    try:
+        balance = Decimal(str(credits.get("balance")))
+    except InvalidOperation:
+        return None
+    if not balance.is_finite() or balance <= 0:
+        return None
+    return "<0.01" if balance < Decimal("0.01") else f"{balance:,.2f}".rstrip("0").rstrip(".")
+
+
 RESET_CREDIT_TTL = 30 * 86400  # Codex reset credits expire ~30 days after granting
 
 
@@ -573,7 +592,7 @@ SEV_DOT = {"green": "🟢", "yellow": "🟡", "orange": "🟠", "red": "🔴"}
 # Plain-language explanation shown at the bottom of the dropdown (see main()).
 # Keep this in sync by hand if the thresholds above change.
 HOW_COLORS_WORK = [
-    "Every number is % LEFT, not used — a bigger number is always better.",
+    "Limit meters show % LEFT, not used — a bigger number is always better.",
     "Session/Weekly meters color by PACE: are you spending faster than a",
     "  straight line to the next reset, not just 'is the number big?'",
     "🟢 on pace or better   🟡 a bit behind   🟠 well behind   🔴 way behind",
@@ -584,6 +603,8 @@ HOW_COLORS_WORK = [
     "  you're close to empty and pace stops mattering.",
     "0% left shows ☠️ instead of 🔴 — you're not just critical, you're out.",
     "If weekly hits ☠️, session shows ☠️ too — a dead weekly blocks you either way.",
+    "When a Codex limit is exhausted and credits remain, Cx shows credits (cr).",
+    "  Credits stay neutral: their balance has no known reset or expiry line.",
     "Codex weekly folds in banked reset credits (each buys back a full window):",
     "  '164% left' = 64% now + one reset (+100%). Set codex_count_reset_credits",
     "  to false in the config to show the raw number instead.",
@@ -790,6 +811,10 @@ def main():
     cx_session, cx_weekly = codex_windows(cx)
     cx_s = win_left(cx_session) if codex else None
     cx_w = win_left(cx_weekly) if codex else None
+    cx_credits = codex_credit_text(codex)
+    cx_rolled = any((w or {}).get("_rolled") for w in (cx_session, cx_weekly))
+    cx_exhausted = any(v is not None and v <= 0 for v in (cx_s, cx_w)) or (cx.get("limit_reached") and not cx_rolled)
+    cx_using_credits = cx_credits is not None and cx_exhausted
 
     # Banked Codex rate-limit reset credits each buy back a full window (~+100%),
     # so they're real weekly headroom, not a footnote: fold them into the weekly
@@ -868,6 +893,8 @@ def main():
     # Grok Bot, Grok and Copilot are single meters, dot on the right.
     segments = {"claude": f"{cc_sd}CC{cc_sv}│{cc_wv}{cc_wd}",
                 "codex": f"{cx_sd}Cx{cx_sv}│{cx_wv}{cx_wd}"}
+    if cx_using_credits:
+        segments["codex"] = f"Cx{cx_credits}cr"
     if cursor:
         cu_tv, cu_td = cell(cu_total, False, cu_total_sev)
         cu_av, cu_ad = cell(cu_api, False, cu_api_sev)
@@ -963,8 +990,12 @@ def main():
             print(line(f"{extra_lim.get('limit_name', 'other')}: session {s_txt} · weekly {w_txt} left",
                        color=color_for(min((v for v in (s, w) if v is not None), default=None)), mono=True))
         credits = codex.get("credits") or {}
-        if credits.get("has_credits"):
-            print(line(f"Credits  {credits.get('balance')}", mono=True))
+        if cx_credits is not None:
+            status = "  ·  using credits" if cx_using_credits else ""
+            print(line(f"Credits  {cx_credits} left{status}", mono=True))
+        elif credits.get("has_credits"):
+            status = "  ·  overage limit reached" if credits.get("overage_limit_reached") else ""
+            print(line(f"Credits  {credits.get('balance')}{status}", mono=True))
         resets = (codex.get("rate_limit_reset_credits") or {}).get("available_count")
         if resets and not fold_resets:  # when folded, the weekly breakdown already shows it
             print(line(f"Reset credits available: {resets}", mono=True))
