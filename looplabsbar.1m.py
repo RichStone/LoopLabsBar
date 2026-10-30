@@ -371,14 +371,18 @@ def fetch_grok(state):
 def grok_usage(grok):
     """(used_percent, period_start_epoch, period_end_epoch) from the credits payload,
     any of them None when absent. Percent comes from config.creditUsagePercent, else
-    onDemandUsed/onDemandCap; the period from currentPeriod, else billingPeriod*."""
+    legacy used/monthlyLimit; the period from currentPeriod, else billingPeriod*.
+    Typed weekly/monthly configs omit creditUsagePercent when it is zero (proto3)."""
     cfg = (grok or {}).get("config") or {}
-    used = cfg.get("creditUsagePercent")
-    if used is None:
-        cap = ((cfg.get("onDemandCap") or {}).get("val")) or 0
-        spent = (cfg.get("onDemandUsed") or {}).get("val")
-        used = spent / cap * 100 if cap and spent is not None else None
     period = cfg.get("currentPeriod") or {}
+    used = cfg.get("creditUsagePercent")
+    if "creditUsagePercent" not in cfg and period.get("type") in (
+            "USAGE_PERIOD_TYPE_WEEKLY", "USAGE_PERIOD_TYPE_MONTHLY"):
+        used = 0.0
+    if used is None:
+        cap = ((cfg.get("monthlyLimit") or {}).get("val")) or 0
+        spent = ((cfg.get("used") or {}).get("val")) or 0
+        used = spent / cap * 100 if cap else None
     end = reset_epoch(period.get("end")) or reset_epoch(cfg.get("billingPeriodEnd"))
     start = reset_epoch(period.get("start")) if period.get("end") else reset_epoch(cfg.get("billingPeriodStart"))
     return used, start, end

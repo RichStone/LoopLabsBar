@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-30
+
+- Show zero usage for Grok's weekly and monthly allowances when the API omits the zero percentage, and use the included budget rather than extra spending for legacy usage.
+
 ## 2026-10-24
 
 - Show remaining Codex credits in neutral menu-bar text after a usage limit is exhausted, label the dropdown balance `using credits`, and return to percentage meters after reset.

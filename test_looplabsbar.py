@@ -24,7 +24,7 @@ def usage(session=None, weekly=100, balance="58061.3185810000", **credit_fields)
     }
 
 
-def render(codex, *, cached=False, config=None):
+def render(codex=None, *, grok=None, grokbot=None, cached=False, config=None):
     """Exercise the full SwiftBar output without network, credentials, or disk writes."""
     state = {"codex": {"data": copy.deepcopy(codex), "ts": NOW - 60}} if cached else {}
     output = io.StringIO()
@@ -35,6 +35,8 @@ def render(codex, *, cached=False, config=None):
             "fetch_codex_entitlement": None, "fetch_claude_profile": None,
             **{f"fetch_{provider}": (None, None) for provider in
                ("claude", "cursor", "grokbot", "grok", "copilot")},
+            "fetch_grok": (copy.deepcopy(grok), None),
+            "fetch_grokbot": (copy.deepcopy(grokbot), None),
             "fetch_codex": (None, "offline") if cached else (copy.deepcopy(codex), None),
         }.items():
             stack.enter_context(patch.object(bar, name, return_value=value))
@@ -106,6 +108,53 @@ class CodexCreditsTest(unittest.TestCase):
 
     def test_provider_visibility_still_applies(self):
         self.assertEqual(render(usage(), config={"menubar": []})[0], "LL | font=Menlo size=12")
+
+
+class GrokUsageTest(unittest.TestCase):
+    def test_omitted_zero_percentage_shows_full_period_allowance(self):
+        for period_type, seconds, label in (("USAGE_PERIOD_TYPE_WEEKLY", bar.SEVEN_DAY_SECONDS, "Weekly"),
+                                            ("USAGE_PERIOD_TYPE_MONTHLY", 30 * 86400, "Credits")):
+            with self.subTest(period_type=period_type):
+                data = {"config": {"currentPeriod": {"type": period_type,
+                                                   "start": NOW - seconds // 2,
+                                                   "end": NOW + seconds // 2},
+                                   "isUnifiedBillingUser": True,
+                                   "onDemandCap": {"val": 1000}, "onDemandUsed": {"val": 800}}}
+                rows = render(grok=data, config={"menubar": ["grok"]})
+                self.assertEqual(rows[0], "Gk100🟢 | font=Menlo size=12")
+                self.assertTrue(any(r.startswith(f"{label:<8} 100% left") for r in rows))
+
+    def test_explicit_percentage_counts_down_remaining_allowance(self):
+        data = {"config": {"creditUsagePercent": 1.0}}
+        rows = render(grok=data, config={"menubar": ["grok"]})
+        self.assertEqual(rows[0], "Gk99🟢 | font=Menlo size=12")
+
+    def test_legacy_included_usage_is_separate_from_extra_spending(self):
+        data = {"config": {"monthlyLimit": {"val": 1000}, "used": {"val": 250},
+                           "onDemandCap": {"val": 100}, "onDemandUsed": {"val": 80}}}
+        self.assertEqual(bar.grok_usage(data)[0], 25)
+        self.assertEqual(render(grok=data, config={"menubar": ["grok"]})[0],
+                         "Gk75🟢 | font=Menlo size=12")
+
+    def test_extra_spending_alone_does_not_become_included_usage(self):
+        data = {"config": {"onDemandCap": {"val": 100}, "onDemandUsed": {"val": 80}}}
+        self.assertIsNone(bar.grok_usage(data)[0])
+        rows = render(grok=data, config={"menubar": ["grok"]})
+        self.assertTrue(any("usage not reported" in r for r in rows))
+
+    def test_missing_legacy_used_scalar_means_zero_used(self):
+        self.assertEqual(bar.grok_usage({"config": {"monthlyLimit": {"val": 1000}, "used": {}}})[0], 0)
+
+    def test_untyped_or_null_percentage_remains_unknown(self):
+        for cfg in ({}, {"currentPeriod": {"end": NOW + 100}},
+                    {"currentPeriod": {"type": "USAGE_PERIOD_TYPE_WEEKLY"}, "creditUsagePercent": None}):
+            with self.subTest(cfg=cfg):
+                self.assertIsNone(bar.grok_usage({"config": cfg})[0])
+
+    def test_cli_and_cursor_backed_bot_keep_separate_allowances(self):
+        rows = render(grok={"config": {"creditUsagePercent": 1}},
+                      grokbot={"usagePercent": 4.9}, config={"menubar": ["grokbot", "grok"]})
+        self.assertEqual(rows[0], "Gb95🟢 Gk99🟢 | font=Menlo size=12")
 
 
 if __name__ == "__main__":
