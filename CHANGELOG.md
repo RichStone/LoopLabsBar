@@ -2,6 +2,7 @@
 
 ## 2026-10-30
 
+- Shorten the Codex credit segment to whole credits without a suffix, such as `Cx42,579`, while keeping decimals in the dropdown.
 - Show zero usage for Grok's weekly and monthly allowances when the API omits the zero percentage, and use the included budget rather than extra spending for legacy usage.
 
 ## 2026-10-24

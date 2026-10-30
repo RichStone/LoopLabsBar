@@ -51,7 +51,7 @@ class CodexCreditsTest(unittest.TestCase):
         for session, weekly in ((None, 100), (20, 100), (100, 20), (100, None), (100, 100)):
             with self.subTest(session=session, weekly=weekly):
                 rows = render(usage(session, weekly))
-                self.assertEqual(rows[0], "Cx58,061.32cr | font=Menlo size=12")
+                self.assertEqual(rows[0], "Cx58,061 | font=Menlo size=12")
                 credit_row = next(r for r in rows if r.startswith("Credits  "))
                 self.assertIn("58,061.32 left  ·  using credits", credit_row)
                 self.assertIn("color=#000000,#ffffff", credit_row)
@@ -69,12 +69,14 @@ class CodexCreditsTest(unittest.TestCase):
             with self.subTest(fields=fields):
                 self.assertEqual(render(usage(**fields))[0], "Cx│0☠️ | font=Menlo size=12")
 
-    def test_small_and_unlimited_credit_balances(self):
-        for fields, expected in (({"balance": "0.5"}, "0.5"),
-                                 ({"balance": "0.001"}, "<0.01"),
+    def test_compact_credit_balances(self):
+        for fields, expected in (({"balance": "42579.15"}, "42,579"),
+                                 ({"balance": "42579.999"}, "42,579"),
+                                 ({"balance": "0.5"}, "<1"),
+                                 ({"balance": "0.001"}, "<1"),
                                  ({"unlimited": True, "balance": None}, "∞")):
             with self.subTest(fields=fields):
-                self.assertEqual(render(usage(**fields))[0], f"Cx{expected}cr | font=Menlo size=12")
+                self.assertEqual(render(usage(**fields))[0], f"Cx{expected} | font=Menlo size=12")
 
     def test_missing_credit_payload_keeps_exhausted_meter(self):
         data = usage()
@@ -84,7 +86,7 @@ class CodexCreditsTest(unittest.TestCase):
     def test_explicit_limit_reached_without_window_values(self):
         data = usage(weekly=None)
         data["rate_limit"]["limit_reached"] = True
-        self.assertEqual(render(data)[0], "Cx58,061.32cr | font=Menlo size=12")
+        self.assertEqual(render(data)[0], "Cx58,061 | font=Menlo size=12")
 
     def test_reset_restores_percentage_meter_even_with_stale_limit_flag(self):
         data = usage()
@@ -94,7 +96,7 @@ class CodexCreditsTest(unittest.TestCase):
 
     def test_cached_credits_remain_visible_with_warning(self):
         rows = render(usage(), cached=True)
-        self.assertEqual(rows[0], "Cx58,061.32cr | font=Menlo size=12")
+        self.assertEqual(rows[0], "Cx58,061 | font=Menlo size=12")
         self.assertTrue(any("⚠ offline" in r for r in rows))
         self.assertTrue(any("showing data from" in r for r in rows))
 
@@ -104,7 +106,7 @@ class CodexCreditsTest(unittest.TestCase):
         for count_resets in (True, False):
             with self.subTest(count_resets=count_resets):
                 self.assertEqual(render(data, config={"codex_count_reset_credits": count_resets})[0],
-                                 "Cx58,061.32cr | font=Menlo size=12")
+                                 "Cx58,061 | font=Menlo size=12")
 
     def test_provider_visibility_still_applies(self):
         self.assertEqual(render(usage(), config={"menubar": []})[0], "LL | font=Menlo size=12")

@@ -490,7 +490,7 @@ def win_left(window):
     return left(window.get("used_percent")) if window else None
 
 
-def codex_credit_text(codex):
+def codex_credit_text(codex, *, compact=False):
     """Spendable credit balance, with no inferred percentage or expiry."""
     credits = (codex or {}).get("credits") or {}
     if credits.get("overage_limit_reached"):
@@ -505,6 +505,8 @@ def codex_credit_text(codex):
         return None
     if not balance.is_finite() or balance <= 0:
         return None
+    if compact:
+        return "<1" if balance < 1 else f"{int(balance):,}"
     return "<0.01" if balance < Decimal("0.01") else f"{balance:,.2f}".rstrip("0").rstrip(".")
 
 
@@ -607,7 +609,7 @@ HOW_COLORS_WORK = [
     "  you're close to empty and pace stops mattering.",
     "0% left shows ☠️ instead of 🔴 — you're not just critical, you're out.",
     "If weekly hits ☠️, session shows ☠️ too — a dead weekly blocks you either way.",
-    "When a Codex limit is exhausted and credits remain, Cx shows credits (cr).",
+    "When a Codex limit is exhausted and credits remain, Cx shows whole credits.",
     "  Credits stay neutral: their balance has no known reset or expiry line.",
     "Codex weekly folds in banked reset credits (each buys back a full window):",
     "  '164% left' = 64% now + one reset (+100%). Set codex_count_reset_credits",
@@ -898,7 +900,7 @@ def main():
     segments = {"claude": f"{cc_sd}CC{cc_sv}│{cc_wv}{cc_wd}",
                 "codex": f"{cx_sd}Cx{cx_sv}│{cx_wv}{cx_wd}"}
     if cx_using_credits:
-        segments["codex"] = f"Cx{cx_credits}cr"
+        segments["codex"] = f"Cx{codex_credit_text(codex, compact=True)}"
     if cursor:
         cu_tv, cu_td = cell(cu_total, False, cu_total_sev)
         cu_av, cu_ad = cell(cu_api, False, cu_api_sev)

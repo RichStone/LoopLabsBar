@@ -37,7 +37,7 @@ Copilot (individual)
 Premium  92% left  ·  1382 of 1500  ·  resets Aug 1
 ```
 
-When a Codex session or weekly limit is exhausted and spendable credits remain, its menu-bar segment switches to the credit balance, e.g. `Cx58,061.32cr`. This uses neutral text with no status dot, percentage, or estimated expiry: the balance has no known time window to pace against. The dropdown keeps the individual limit meters and labels the balance `using credits`. Once the limits reset, the title returns to the usual percentage meters. Banked **reset credits** are separate and keep their existing weekly-headroom display.
+When a Codex session or weekly limit is exhausted and spendable credits remain, its menu-bar segment switches to the credit balance, e.g. `Cx58,061` with whole credits and no suffix, while the dropdown keeps the decimals. This uses neutral text with no status dot, percentage, or estimated expiry: the balance has no known time window to pace against. The dropdown keeps the individual limit meters and labels the balance `using credits`. Once the limits reset, the title returns to the usual percentage meters. Banked **reset credits** are separate and keep their existing weekly-headroom display.
 
 ## Why
 
